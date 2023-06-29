@@ -1,0 +1,236 @@
+---
+title: "Causal Inference Homework 2"
+author: "Junyi Liao, 20307110289"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data Preparing
+The data we use are put in the table file ```TrustVic.csv```. Here is a brief description of its columns. <br>
+• ```y_trust```: Generalized trust (0-10) at 2006 (Outcome) <br>
+• ```x_threat```: Experiencing a threat (0,1) in year before 2006 (Treatment) <br>
+• ```c_age```: Age measure at 2005 <br>
+• ```c_male```: Gender at 2005 (Male=1, Female=0) <br>
+• ```c_education```: Level of education (0-10) at 2005 <br>
+• ```c_income```: Income categorical (0,1,2,3) at 2005 <br>
+    In this question, our objective is to estimate the causal effect of victimization ```(x_threat)``` on generalized trust ```(y_trust)```. The columns beginning with letter 'c' are potential confounders in our analysis. The original dataset includes 23243 individuals, but a lot of data were missing, which are shown as ```NA``` in the cells. We have excluded the individuals with missing data and conduct our study over the individuals with complete data. The processed data are put in ```TrustVicProcessed.csv```. Let's take a look at our data.
+```{r, message=FALSE, warning=FALSE}
+# Import preliminary packages.
+options(warn = -1)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+library(grid)
+library(MatchIt)
+library(tableone)
+library(survey)
+# Read in the data.
+TrustVic <- read.csv('TrustVicProcessed.csv')
+cat('Sample size:', dim(TrustVic)[1],
+    '\nTreated (Victimization):', sum(TrustVic$x_threat), 
+    '\nControl (No victimization):', dim(TrustVic)[1] - sum(TrustVic$x_threat))
+```
+After exclusion, the valid data includes 3650 individuals, of which 379 are treated, say they experienced a threat in year before 2006, and other 3271 are control units.
+
+
+## Crude Analysis
+We first check the relationship between trust and victimization. A coarse method is to compare the mean difference between the treated and the control group. The result is shown below.
+```{r}
+# Set the working directory and read in data from csv. file.
+summary(lm(y_trust ~ x_threat, data=TrustVic))
+```
+From the result, we can infer that victimization (x_threat) is associated with the generalized trust level. In average, the individuals who experienced a threat showed a 0.8 lower level of trust than those who did not, and such a difference is very significant (p < 0.001). But we cannot conclude with a causal effect of victimization on trust from this association.
+
+To study the causal effect, we fit a linear regression model which is adjusted by potential confounders. The result is shown below.
+```{r}
+summary(lm(y_trust ~ c_age + c_male + c_education + c_income + x_threat, 
+           data=TrustVic))
+```
+After adjustment, the coefficient of victimization is -0.679, still very significant (p < 0.001). Provided that the covariates we adjusted for suffice to account for all confoundings, and that no model misspecification exists, the estimated average causal effect is the same as -0.679, which indicates a negative impact of victimization on trust. But, noticing that $R^2=0.0579$ in our result, the goodness-of-fit is far from satisfactory. This result contradicts with our no-misspecification assumption. Hence, we need to conduct more investigation.
+
+## Propensity Score Estimation
+To adjust for confoundings, we are going to apply propensity score method in our study. To begin with, we estimate the propensity score of individuals by fitting a logistic regression model, which is a parametric approach. 
+```{r}
+ps.model <- glm(x_threat ~ c_age + c_male + c_education + c_income, 
+                family = binomial, data = TrustVic)
+summary(ps.model)
+```
+After that, we plot a histogram of propensity score by treatment status to visualize the distribution and check the overlap. The result is shown below.
+```{r}
+options(repr.plot.width = 15, repr.plot.height = 7.5)
+plt1 <- ggplot() + 
+  geom_histogram(data = data.frame(ps = ps.model$fitted.values[TrustVic$x_threat == 1]), 
+                 bins = 25, aes(x = ps), fill='#FF9999', color="white")+
+  labs(title = 'Estimated PS distribution (Treated)', x = 'Propensity Score', y = 'Count') + 
+  theme(plot.title = element_text(size=13.5, hjust=0.5, margin=unit(c(0,0,.45,0), 'cm')),
+        axis.title.x = element_text(size=12, margin=unit(c(.25,0,0,0), 'cm')), 
+        axis.title.y = element_text(size=12, margin=unit(c(0,.45,0,0), 'cm')), 
+        axis.text = element_text(size=10.5))
+plt2 <- ggplot() + 
+  geom_histogram(data = data.frame(ps = ps.model$fitted.values[TrustVic$x_threat == 0]), 
+                 bins = 25, aes(x = ps), fill='#6699FF', color="white")+
+  labs(title = 'Estimated PS distribution (Control)', x = 'Propensity Score', y = '') + 
+  theme(plot.title = element_text(size=13.5, hjust=0.5, margin=unit(c(0,0,.45,0), 'cm')),
+        axis.title.x = element_text(size=12, margin=unit(c(.25,0,0,0), 'cm')), 
+        axis.text = element_text(size=10.5))
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(1, 2)))
+print(plt1, vp=viewport(layout.pos.row=1, layout.pos.col=1))
+print(plt2, vp=viewport(layout.pos.row=1, layout.pos.col=2))
+```
+<br>
+The estimated propensity scores of both treated and control groups fall in the interval [0,0.26], which is their common support. The overlap is satisfactory in terms of positivity assumption.
+
+
+## Matching
+We have noticed that in our data, the size of treated group is far smaller than the control group. So we applied propensity score matching to our data. In our study, we use one-to-one matching without replacement, so that each treated unit is matched with one control unit. We choose the linear propensity score $e(C)$ as the distance metric, i.e.
+$$D_{ij} = \left\vert \log \frac{e(C_i)}{1-e(C_i)} - \log \frac{e(C_j)}{1-e(C_j)}\right\vert,$$
+and we match each treated unit with its nearest neighbor in control group. This method is not guaranteed to be optimal since the order of matching can affect our result. Also note that after matching, our estimand is the average treatment effect for the treated group (ATT) instead of average treatment effect (ATE).
+```{r, message=FALSE, warning=FALSE}
+match.model <- matchit(x_threat ~ c_age + c_male + c_education + c_income,
+                  method = 'nearest', data=TrustVic, distance = 'glm',
+                  ratio=1, replace=FALSE)
+TrustVicMatched <- match.data(match.model)
+# Draw a jitter plot.
+plot(match.model, type='jitter')
+```
+
+After matching, we need to check the covariate balance between treatment and control groups to verify the exchangeability. To check this, we plot the mean of each covariate against the estimated propensity score, separately by treatment status. In a good matching result, the treatment and control groups should have nearly identical means of each covariate at each level of the propensity score. Here we use a lowess smoother to estimate the mean of each covariate, by treatment status, at each level of the propensity score.
+
+```{r, message=FALSE, warning=FALSE}
+plotLowess <- function(data, variable, ylabel) {
+  data$variable <- data[, variable]
+  data$x_threat <- as.factor(data$x_threat)
+  support <- c(min(data$variable), max(data$variable))
+  ggplot(data, aes(x = distance, y = variable, color = x_threat)) +
+    geom_point(alpha = 0.2, size = 1.2) +
+    geom_smooth(method = "loess", se = F) +
+    labs(x = "Propensity score", y = ylabel, col = 'Threat') +
+    theme_bw() +
+    ylim(support)
+}
+
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(2, 2)))
+print(plotLowess(TrustVicMatched, 'c_age', 'Age'), 
+      vp=viewport(layout.pos.row=1, layout.pos.col=1))
+print(plotLowess(TrustVicMatched, 'c_male', 'Male'), 
+      vp=viewport(layout.pos.row=1, layout.pos.col=2))
+print(plotLowess(TrustVicMatched, 'c_education', 'Education'), 
+      vp=viewport(layout.pos.row=2, layout.pos.col=1))
+print(plotLowess(TrustVicMatched, 'c_income', 'Income'), 
+      vp=viewport(layout.pos.row=2, layout.pos.col=2))
+
+```
+
+As is shown in the plot, the treatment and control groups have nearly identical means of each covariate at each level of the propensity score, indicating that all covariates are balanced well within our matched groups. Furthermore, we compute the standardized difference-in-means by treatment status to check the covariate balance over the entire groups.
+
+```{r}
+table1 <- CreateTableOne(var=c('c_age', 'c_male', 'c_education', 'c_income'), 
+                         strata='x_threat', data=TrustVic, test = TRUE)
+table2 <- CreateTableOne(var=c('c_age', 'c_male', 'c_education', 'c_income'), 
+                         strata='x_threat', data=TrustVicMatched, test=TRUE)
+kableone(table1, smd=TRUE)  # Before Matching.
+kableone(table2, smd=TRUE)  # After Matching.
+```
+It is seen that, before matching, the SMDs of all covariates are greater than 0.1, indicating an imbalance between two groups. After matching, all SMDs are reduced to less than 0.01. Hence, the matching result achieves a good balance between the treatment and the control groups.<br>
+
+After checking the covariate balance, we apply a paired t-test to the matched units to estimate the ATT and its uncertainty, as well as a two-sample (unpaired) $t$-test for comparison. The result is shown below.
+
+```{r}
+ggplot(TrustVicMatched) +
+  geom_boxplot(aes(y = y_trust, x = as.factor(x_threat), 
+                   group = as.factor(x_threat), fill = as.factor(x_threat)),) +
+  labs(title = 'Trust of Treatment & Control after Matching', x = 'Threat', 
+       y = 'Trust Level', fill = 'Treatment') +
+  theme(plot.title = element_text(size=13.5, hjust=0.5, margin=unit(c(0,0,.45,0), 'cm')),
+        axis.title.x = element_text(size=12, margin=unit(c(.25,0,0,0), 'cm')), 
+        axis.title.y = element_text(size=12, margin=unit(c(0,.45,0,0), 'cm')), 
+        axis.text = element_text(size=10.5))
+```
+```{r}
+outcomeT <- with(arrange(TrustVicMatched, subclass), y_trust[x_threat == 1])
+outcomeC <- with(arrange(TrustVicMatched, subclass), y_trust[x_threat == 0])
+with(TrustVicMatched, t.test(outcomeT, outcomeC, paired = TRUE))
+with(TrustVicMatched, t.test(outcomeT, outcomeC, var.equal = TRUE, paired = FALSE))
+```
+The result of paired $t$-test suggests an average treatment effect of -0.797 in the treatment group, i.e., the victimized individuals would have 0.797 higher generalized trust on average, had they not been in threat. The $p$-value is less than 0.001, and the 95% confidence interval is [-1.120, -0.474], hence our result is significant: victimization does have causal effect on trust level. Two-sample $t$-test gives a similar result, however it is not as strong as paired $t$-test (the $p$-value is larger) since it pools all matched individuals together, which may neglect some intra-group information.<br>
+
+In the previous analysis, we only include the propensity score in our distance measure. Such matching method can lead to inexact match and systematic bias. To avoid this problem, we adopt a doubly-robust approach. We fit a regression model to our sample with adjustment for confoundings, in our problem, the age, gender, education and income. The result is shown below.
+
+```{r}
+match.lr <- lm(y_trust ~ c_age + c_male + c_education + c_income + x_threat, 
+           data=TrustVicMatched)
+summary(match.lr)
+```
+The result shows that the estimated average causal effect (the coefficient of ```x_threat```) is -0.799. The estimators with and without adjustment do not diverge since the covariates are well-balanced in our matched units.
+
+## Weighting
+In the previous section, we have estimated the propensity scores of our sample units, hence we can apply inverse probability weighting (IPW) to both the treatment and control groups based on the estimated propensity score. The weight can be formulated as
+$$w_i = \frac{1}{A_i\cdot e(C_i) + (1-A_i)\cdot \left(1-e(C_i)\right)}.$$
+We compute the IP weights of our samples, and draw a density plot for the weights.
+```{r, warning=FALSE}
+# Unstabilized IP weighting.
+ps <- ps.model$fitted.values
+prob_t <- mean(TrustVic$x_threat)
+ipw <- ifelse(TrustVic$x_threat == 1, 1 / ps, 1 / (1 - ps))
+
+ggplot(data.frame(ipw = ipw)) +
+  geom_density(aes(x = log(ipw), colour='density'), colour = '#198964', size = 0.65) + 
+  geom_vline(aes(xintercept=log(mean(ipw)), colour='Mean'),
+            colour="#0077FF", linetype="dashed", size=0.85) +
+  labs(title = 'Unstabilized IP Weights', x = 'Logarithmic weight', y = 'Density') +
+  scale_x_continuous(limits = c(-1, 3.5)) +
+  theme(plot.title = element_text(size=13.5, hjust=0.5, margin=unit(c(0,0,.45,0), 'cm')),
+        axis.title.x = element_text(size=12, margin=unit(c(.25,0,0,0), 'cm')), 
+        axis.title.y = element_text(size=12, margin=unit(c(0,.45,0,0), 'cm')), 
+        axis.text = element_text(size=10.5))
+```
+In this plot (x-axis is log-scaled), the mean weight deviates a lot from the mode. Most of weights fall in [1,10], but some values can range from 100 to 1000 (most of them are treated units). The reason is that the weight we use is an unstabilized weight, which may suffer from extreme values, e.g. if $e(C_i)$ is close to 0 or 1, the weight can be very large, which can introduce much uncertainty. To avoid this drawback, we apply the stabilized IP weights, which is defined as
+$$w_i = \frac{A_i\cdot\mathbb{P}(A_i=1) + (1-A_i)\cdot\mathbb{P}(A_i=0)}{A_i\cdot e(C_i) + (1-A_i)\cdot \left(1-e(C_i)\right)}.$$
+It is the unstabilized IP weight multiplied by a marginal probability, i.e. $\mathbb{P}(A_i=1)$ and $\mathbb{P}(A_i=0)$ are identical for all units.
+
+```{r, warning=FALSE}
+# Stabilized IP weighting.
+ipw <- ifelse(TrustVic$x_threat == 1, prob_t / ps, (1 - prob_t) / (1 - ps))
+TrustVicWeighted <- cbind(TrustVic, ipw)
+
+options(repr.plot.width = 5, repr.plot.height = 5)
+ggplot(TrustVicWeighted) +
+  geom_density(aes(x = log(ipw)), color = '#198964', size = 0.65) + 
+  geom_vline(aes(xintercept=log(mean(ipw))),
+            color="#0077FF", linetype="dashed", size=0.85) +
+  labs(title = 'Stabilized IP Weights', x = 'Logarithmic weight', y = 'Density') +
+  theme(plot.title = element_text(size=13.5, hjust=0.5, margin=unit(c(0,0,.45,0), 'cm')),
+        axis.title.x = element_text(size=12, margin=unit(c(.25,0,0,0), 'cm')), 
+        axis.title.y = element_text(size=12, margin=unit(c(0,.45,0,0), 'cm')), 
+        axis.text = element_text(size=10.5))
+```
+
+It is seen that, after stabilization, the weights of our samples have smaller variance, which helps to reduce uncertainty and improve the robustness of our post-weighting analysis. Let's check the SMD between treatment and control groups before and after matching. 
+
+```{r, warning=FALSE}
+iptwsvy <- svydesign(ids = ~ 1, data = TrustVicWeighted, weights = ~ ipw)
+table3 <- svyCreateTableOne(var=c('c_age', 'c_male', 'c_education', 'c_income'), 
+                         strata='x_threat', data=iptwsvy, test=TRUE)
+kableone(table1, smd=TRUE)  # Before IPW.
+kableone(table3, smd=TRUE)  # After IPW.
+```
+As is shown above, the SMDs of all covariates were reduced to less than 0.1 after IP weighting, indicating a good balance in our weighted pseudo-population. We assume a marginal structural model in our problem:
+$$\mathbb{E}[Y^a] = \beta_0 + \beta_1 a,$$
+in which $\beta_1 = \mathbb{E}[Y^1 - Y^0]$ is the average causal effect. For estimation, we fit a weighted regression model $\mathbb{E}[Y|A] = \theta_0 + \theta_1 A$ to our pseudo-population. Under the assumption of no unmeasured confounding, the weighted regression estimates the parameters of the MSM with consistency. Our result is shown below.
+
+```{r, warning=FALSE}
+# Marginal Structural Model.
+weighted.lr <- lm(y_trust ~ x_threat, data = TrustVicWeighted, weights = ipw)
+summary(weighted.lr)
+```
+The average causal effect estimated by IP-weighted regression is -0.620, with $p$-value less than 0.001, hence the result is very significant. If all individuals had been in threat, their generalized trust would drop by -0.620 in average. Also, an approximate 95% confidence interval is given by $[-0.842, -0.397]$.
+
+## Summary
+In this study, we have investigated the causal effect of victimization on trust. We applied different method to analyze our data, including regression with and without potential confounders, propensity score matching and IP weighting. All these methods gave an significant effect of victimization, and the estimated causal effect did not vary a lot across them. (Note that, in propensity score matching, our estimand changes from ATE to ATT, which is constrained in the treatment group.) Hence, the result of our study is robust. <br><br><br>
+
