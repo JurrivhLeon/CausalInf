@@ -5,5 +5,5 @@ This repository includes 2 projects of DATA130059: Causal Inference (Lectured by
 
 The following libraries are needed for running my code.
 ```r
-install.packages(c())
+install.packages(c('dplyr', 'ggplot2', 'ggpubr', 'ggthemes', 'grid', 'MatchIt', 'tableone', 'survey'))
 ```
